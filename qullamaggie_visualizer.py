@@ -20,7 +20,7 @@ UNIVERSES = {
     "Broad Liquid & Diversified": [
         "NVDA", "AMD", "TSLA", "AAPL", "PLTR", "MU", "AMZN", "MSFT", 
         "AVGO", "GOOGL", "META", "ARM", "GE", "CSX", "NFLX", "SLV", 
-        "GLD", "XOM", "CVX", "FCX", "BA", "UNH", "JPM", "COST", "LLY", "FORM"
+        "GLD", "XOM", "CVX", "FCX", "BA", "UNH", "JPM", "COST", "LLY"
     ],
     "Custom / Manual Input": []
 }
@@ -170,25 +170,41 @@ if "scan_results" in st.session_state:
     results = st.session_state["scan_results"]
     
     if not results:
-        st.warning(f"No setups currently pass all filters (surging >{min_surge_pct}%, 10 EMA > 20 EMA, and tight shelf risk ≤{max_risk_bracket}%). The scanner successfully excluded wide, erratic candidates.")
+        st.warning(f"No setups currently pass all filters (surging >{min_surge_pct}%, 10 EMA > 20 EMA, and tight shelf risk ≤{max_risk_bracket}%). Wide and erratic setups have been successfully excluded.")
     else:
         st.subheader(f"✅ Found {len(results)} Qualified Low-Risk Setup(s)")
         
+        # Build Summary Table defensively with .get()
         summary_rows = []
+        tos_export_data = []
         for t, data in results.items():
+            shares_val = data.get("Shares", 0)
+            pos_size_val = data.get("Position Size", 0.0)
+            
             summary_rows.append({
                 "Ticker": t,
-                "Price": f"${data['Price']:.2f}",
-                "40D Surge": f"+{data['Surge %']:.1f}%",
-                "Dist 10 EMA": f"{data['% Off 10 EMA']:.1f}%",
-                "Buy Stop Trigger": f"${data['Buy Stop']:.2f}",
-                "Stop Loss": f"${data['Stop Loss']:.2f}",
-                "Risk %": f"{data['Risk %']:.2f}%",
-                "Shares (for ${:.0f} risk)".format(risk_dollar_budget): f"{data['Shares']:,}",
-                "Total Position Value": f"${data['Position Size']:,.2f}"
+                "Price": f"${data.get('Price', 0.0):.2f}",
+                "40D Surge": f"+{data.get('Surge %', 0.0):.1f}%",
+                "Dist 10 EMA": f"{data.get('% Off 10 EMA', 0.0):.1f}%",
+                "Buy Stop Trigger": f"${data.get('Buy Stop', 0.0):.2f}",
+                "Stop Loss": f"${data.get('Stop Loss', 0.0):.2f}",
+                "Risk %": f"{data.get('Risk %', 0.0):.2f}%",
+                f"Shares (${risk_dollar_budget:.0f} risk)": f"{shares_val:,}",
+                "Total Position Value": f"${pos_size_val:,.2f}"
             })
+            tos_export_data.append({"Symbol": t})
         
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        summary_df = pd.DataFrame(summary_rows)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        
+        # ThinkorSwim Watchlist CSV Export
+        csv_tos = pd.DataFrame(tos_export_data).to_csv(index=False)
+        st.download_button(
+            label="📥 Download ThinkorSwim Watchlist (.csv)",
+            data=csv_tos,
+            file_name="qullamaggie_watchlist.csv",
+            mime="text/csv"
+        )
         
         st.markdown("---")
         
@@ -200,11 +216,11 @@ if "scan_results" in st.session_state:
             
             # Key Execution Metrics
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Current Price", f"${meta['Price']:.2f}")
-            m2.metric("Buy Stop Order", f"${meta['entry_trigger']:.2f}")
-            m3.metric("Stop Loss", f"${meta['stop_loss']:.2f}")
-            m4.metric("Risk Span", f"{meta['Risk %']:.2f}%")
-            m5.metric(f"Position ({meta['Shares']} shs)", f"${meta['Position Size']:,.0f}")
+            m1.metric("Current Price", f"${meta.get('Price', 0.0):.2f}")
+            m2.metric("Buy Stop Order", f"${meta.get('entry_trigger', 0.0):.2f}")
+            m3.metric("Stop Loss", f"${meta.get('stop_loss', 0.0):.2f}")
+            m4.metric("Risk Span", f"{meta.get('Risk %', 0.0):.2f}%")
+            m5.metric(f"Position ({meta.get('Shares', 0)} shs)", f"${meta.get('Position Size', 0.0):,.0f}")
 
             # Plotly Chart
             fig = go.Figure()
@@ -253,7 +269,7 @@ if "scan_results" in st.session_state:
 
             fig.update_layout(
                 height=550,
-                title=f"{selected_ticker} — High Tight Flag (Risk: {meta['Risk %']:.2f}%)",
+                title=f"{selected_ticker} — High Tight Flag (Risk: {meta.get('Risk %', 0.0):.2f}%)",
                 xaxis_rangeslider_visible=False,
                 margin=dict(l=20, r=90, t=40, b=20),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02)
