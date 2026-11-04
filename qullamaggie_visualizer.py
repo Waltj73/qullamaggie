@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Qullamaggie HTF Scanner & Visualizer", layout="wide")
 st.title("🚩 Qullamaggie High Tight Flag & Shelf Scanner")
-st.caption("Batch scans universe, screens for tight 10/20 EMA shelf coiling, and plots exact entry and stop parameters.")
+st.caption("Batch scans universe, screens for tight 10/20 SMA shelf coiling, and plots exact entry and stop parameters.")
 
 # ============================================================
 # WATCHLIST UNIVERSES
@@ -32,7 +32,7 @@ st.sidebar.header("Universe Selection")
 selected_universe = st.sidebar.selectbox("Choose Universe", list(UNIVERSES.keys()), index=0)
 
 if selected_universe == "Custom / Manual Input":
-    default_text = "NVDA, AMD, ARM, PLTR, TSLA, AAPL, GE, CSX, CRWD, PANW"
+    default_text = "NVDA, AMD, ARM, PLTR, TSLA, AAPL, GE, CSX, CRWD, PANW, ADT"
 else:
     default_text = ", ".join(UNIVERSES[selected_universe])
 
@@ -43,10 +43,10 @@ watchlist_input = st.sidebar.text_area(
 )
 
 st.sidebar.header("Scan Criteria")
-min_surge_pct = st.sidebar.slider("Min Prior Surge %", 15, 60, 30, help="Minimum run-up over the last 40 trading days.")
-max_dist_ribbon_pct = st.sidebar.slider("Max Distance from 10 EMA %", 1.0, 5.0, 3.0, help="Distance from 10 EMA (avoids vertical extension).")
+min_surge_pct = st.sidebar.slider("Min Prior Surge %", 15, 60, 30, help="Minimum run-up prior to the resting shelf.")
+max_dist_ribbon_pct = st.sidebar.slider("Max Distance from 10 SMA %", 1.0, 5.0, 3.5, help="Distance above 10 SMA (avoids chasing vertical extensions).")
 max_risk_bracket = st.sidebar.slider("Max Shelf Risk %", 1.5, 8.0, 4.5, step=0.5, 
-                                     help="Disqualifies wide, erratic swings (like CRWD/PANW at 13%+). True shelves stay under 4.5%.")
+                                     help="Shelf range depth filter. Eliminates wide, erratic bars.")
 
 st.sidebar.header("Shelf Geometry & Sizing")
 shelf_lookback = st.sidebar.slider("Shelf Lookback Window (Days)", 3, 10, 5, help="Number of recent bars defining the tight resting shelf.")
@@ -79,7 +79,7 @@ def run_screener(tickers, batch_df, min_surge, max_dist, max_risk, s_lookback, b
             else:
                 df = batch_df.dropna()
                 
-            if len(df) < 50:
+            if len(df) < 60:
                 continue
 
             close = df["Close"]
@@ -87,35 +87,40 @@ def run_screener(tickers, batch_df, min_surge, max_dist, max_risk, s_lookback, b
             low = df["Low"]
             vol = df["Volume"]
 
-            # Technical Averages
-            df["EMA10"] = close.ewm(span=10, adjust=False).mean()
-            df["EMA20"] = close.ewm(span=20, adjust=False).mean()
+            # Technical Averages (Using SMAs per Qullamaggie standards)
+            df["SMA10"] = close.rolling(10).mean()
+            df["SMA20"] = close.rolling(20).mean()
             df["SMA50"] = close.rolling(50).mean()
             df["VolSMA50"] = vol.rolling(50).mean()
 
             curr_c = close.iloc[-1]
-            curr_10 = df["EMA10"].iloc[-1]
-            curr_20 = df["EMA20"].iloc[-1]
+            curr_h = high.iloc[-1]
+            curr_10 = df["SMA10"].iloc[-1]
+            curr_20 = df["SMA20"].iloc[-1]
             curr_50 = df["SMA50"].iloc[-1]
 
-            # 1. Prior Momentum Surge (past 40 bars)
-            low_40 = low.tail(40).min()
-            high_40 = high.tail(40).max()
-            surge_pct = ((high_40 - low_40) / low_40) * 100
+            # 1. Prior Momentum Surge (Evaluated PRIOR to shelf window)
+            prior_df = df.iloc[:-s_lookback]
+            low_prior = prior_df["Low"].tail(40).min()
+            high_prior = prior_df["High"].tail(40).max()
+            surge_pct = ((high_prior - low_prior) / low_prior) * 100
             had_surge = surge_pct >= min_surge
 
-            # 2. Strict Moving Average Ribbon Alignment (10 > 20 > 50 and price > 20)
+            # 2. Ribbon Alignment: Price > 20 SMA, 10 SMA > 20 SMA > 50 SMA
             trend_ok = (curr_c > curr_20) and (curr_10 > curr_20) and (curr_20 > curr_50)
 
-            # 3. Near the 10 EMA (surfing without vertical extension)
-            dist_10 = abs(curr_c - curr_10) / curr_10 * 100
-            near_ribbon = dist_10 <= max_dist
+            # 3. Near Ribbon & Not Parabolic (Surfing close to 10 SMA or inside 10-20 band)
+            dist_10 = ((curr_c - curr_10) / curr_10) * 100
+            near_ribbon = (-1.0 <= dist_10 <= max_dist) or (curr_20 <= curr_c <= curr_10)
 
-            # 4. Volume Drying Up (3-day avg < 50-day average)
-            recent_vol = vol.tail(3).mean()
-            vol_dry = recent_vol < df["VolSMA50"].iloc[-1]
+            # 4. Resting Check: Not printing a new 20-day high today
+            recent_peak = high.iloc[-25:-1].max()
+            not_spiking = curr_h <= recent_peak
 
-            # 5. Tight Shelf Geometry & Stop Distance
+            # 5. Volume Drying Up (Volume below 50d average)
+            vol_dry = vol.iloc[-1] < df["VolSMA50"].iloc[-1]
+
+            # 6. Tight Shelf Geometry & Stop Distance
             shelf_slice = df.tail(s_lookback)
             shelf_high = shelf_slice["High"].max()
             shelf_low = shelf_slice["Low"].min()
@@ -124,10 +129,10 @@ def run_screener(tickers, batch_df, min_surge, max_dist, max_risk, s_lookback, b
             risk_per_share = entry_trigger - stop_loss
             risk_pct = (risk_per_share / entry_trigger) * 100
 
-            # Tightness Filter: Eliminates 13%+ wide swings
+            # Tightness Filter
             is_tight = (risk_pct <= max_risk) and (risk_per_share > 0)
 
-            if had_surge and trend_ok and near_ribbon and vol_dry and is_tight:
+            if had_surge and trend_ok and near_ribbon and not_spiking and vol_dry and is_tight:
                 shares = int(risk_budget / risk_per_share) if risk_per_share > 0 else 0
                 position_val = shares * entry_trigger
 
@@ -135,7 +140,7 @@ def run_screener(tickers, batch_df, min_surge, max_dist, max_risk, s_lookback, b
                     "df": df,
                     "Price": round(curr_c, 2),
                     "Surge %": round(surge_pct, 1),
-                    "% Off 10 EMA": round(dist_10, 1),
+                    "% Off 10 SMA": round(dist_10, 1),
                     "Buy Stop": round(entry_trigger, 2),
                     "Stop Loss": round(stop_loss, 2),
                     "Risk %": round(risk_pct, 2),
@@ -170,11 +175,10 @@ if "scan_results" in st.session_state:
     results = st.session_state["scan_results"]
     
     if not results:
-        st.warning(f"No setups currently pass all filters (surging >{min_surge_pct}%, 10 EMA > 20 EMA, and tight shelf risk ≤{max_risk_bracket}%). Wide and erratic setups have been successfully excluded.")
+        st.warning(f"No setups currently pass all filters (surging >{min_surge_pct}%, 10 SMA > 20 SMA, surfing the ribbon, and tight shelf risk ≤{max_risk_bracket}%). Extended spikes have been filtered out.")
     else:
         st.subheader(f"✅ Found {len(results)} Qualified Low-Risk Setup(s)")
         
-        # Build Summary Table defensively with .get()
         summary_rows = []
         tos_export_data = []
         for t, data in results.items():
@@ -184,8 +188,8 @@ if "scan_results" in st.session_state:
             summary_rows.append({
                 "Ticker": t,
                 "Price": f"${data.get('Price', 0.0):.2f}",
-                "40D Surge": f"+{data.get('Surge %', 0.0):.1f}%",
-                "Dist 10 EMA": f"{data.get('% Off 10 EMA', 0.0):.1f}%",
+                "Prior Surge": f"+{data.get('Surge %', 0.0):.1f}%",
+                "Dist 10 SMA": f"{data.get('% Off 10 SMA', 0.0):.1f}%",
                 "Buy Stop Trigger": f"${data.get('Buy Stop', 0.0):.2f}",
                 "Stop Loss": f"${data.get('Stop Loss', 0.0):.2f}",
                 "Risk %": f"{data.get('Risk %', 0.0):.2f}%",
@@ -197,7 +201,6 @@ if "scan_results" in st.session_state:
         summary_df = pd.DataFrame(summary_rows)
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
         
-        # ThinkorSwim Watchlist CSV Export
         csv_tos = pd.DataFrame(tos_export_data).to_csv(index=False)
         st.download_button(
             label="📥 Download ThinkorSwim Watchlist (.csv)",
@@ -214,7 +217,6 @@ if "scan_results" in st.session_state:
             meta = results[selected_ticker]
             df = meta["df"].tail(120)
             
-            # Key Execution Metrics
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Current Price", f"${meta.get('Price', 0.0):.2f}")
             m2.metric("Buy Stop Order", f"${meta.get('entry_trigger', 0.0):.2f}")
@@ -222,17 +224,16 @@ if "scan_results" in st.session_state:
             m4.metric("Risk Span", f"{meta.get('Risk %', 0.0):.2f}%")
             m5.metric(f"Position ({meta.get('Shares', 0)} shs)", f"${meta.get('Position Size', 0.0):,.0f}")
 
-            # Plotly Chart
             fig = go.Figure()
             fig.add_trace(go.Candlestick(
                 x=df.index, open=df["Open"], high=df["High"],
                 low=df["Low"], close=df["Close"], name="Price"
             ))
-            fig.add_trace(go.Scatter(x=df.index, y=df["EMA10"], name="10 EMA", line=dict(color="orange", width=1.5)))
-            fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], name="20 EMA", line=dict(color="cyan", width=1.5)))
+            fig.add_trace(go.Scatter(x=df.index, y=df["SMA10"], name="10 SMA", line=dict(color="orange", width=1.5)))
+            fig.add_trace(go.Scatter(x=df.index, y=df["SMA20"], name="20 SMA", line=dict(color="cyan", width=1.5)))
             fig.add_trace(go.Scatter(x=df.index, y=df["SMA50"], name="50 SMA", line=dict(color="magenta", width=1, dash="dot")))
 
-            # Tight Shelf Yellow Box
+            # Tight Shelf Highlight
             fig.add_shape(
                 type="rect",
                 x0=meta["shelf_start"], y0=meta["shelf_low"],
@@ -241,7 +242,7 @@ if "scan_results" in st.session_state:
                 line=dict(color="rgba(255, 215, 0, 0.8)", width=1),
             )
 
-            # Buy Stop Line
+            # Buy Stop Trigger
             fig.add_shape(
                 type="line",
                 x0=meta["shelf_start"], y0=meta["entry_trigger"],
@@ -254,7 +255,7 @@ if "scan_results" in st.session_state:
                 showarrow=False, xanchor="left", font=dict(color="lime", size=12)
             )
 
-            # Stop Loss Line
+            # Stop Loss Level
             fig.add_shape(
                 type="line",
                 x0=meta["shelf_start"], y0=meta["stop_loss"],
